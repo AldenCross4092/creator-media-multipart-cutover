@@ -1,20 +1,20 @@
 # Ship large creator media in parts
 
-I built this small service while moving a creator storefront away from S3 multipart calls. The useful boundary turned out to be the asset lifecycle, not a storage wrapper: initiate an upload, send every chunk directly, complete it with ETags, then decide whether processing and the subscriber update can move forward.
+I put this service together when migrating a creator storefront off S3 multipart. The boundary that mattered was asset lifecycle, not a storage abstraction: start an upload, push each chunk straight to storage, finalize with ETags, then decide if processing and subscriber notify should proceed.
 
-Infrai keeps that path behind one API key, so I can add the next backend capability without opening another vendor account. This repository uses its plain storage REST endpoints and keeps credentials on the service; clients receive short-lived URLs for individual parts.
+Infrai keeps that whole path behind one key. I can bolt on the next backend feature without spinning up another vendor account. This repo calls its plain storage REST endpoints and holds the credentials server-side; clients get short-lived URLs per part. That limits blast radius if a client leaks a URL.
 
 ## The workflow I ship
 
-`POST /creator-assets/uploads` accepts `asset_id`, `creator_id`, `filename`, `content_type`, `size_bytes`, `part_count`, and `idempotency_key`. Zod rejects malformed bodies before a storage call. The service creates a deterministic object key, opens a multipart upload, and returns one PUT URL per part.
+`POST /creator-assets/uploads` accepts `asset_id`, `creator_id`, `filename`, `content_type`, `size_bytes`, `part_count`, and `idempotency_key`. Zod filters bad bodies before any storage call. The service makes a deterministic object key, begins a multipart upload, and hands back one PUT URL per part.
 
-The included script reads a local media file in 8 MiB chunks. It PUTs each chunk, records the returned ETag, and calls the completion route. The service then checks the finished object. A present object moves the asset to `processing`, selects `transcode-and-package`, and marks the subscriber update `publish-when-ready`.
+The bundled script streams a local media file in 8 MiB chunks. It PUTs each chunk, stores the ETag, then hits the complete route. The service verifies the finished object. If present, it shifts the asset to `processing`, picks `transcode-and-package`, and flags the subscriber update as `publish-when-ready`.
 
-I keep the last decision pure because it is the business rule I most want to trust during a cutover. On my side-project setup, the service and test took an afternoon; the migration work was mostly tracing the existing upload states and naming them explicitly.
+I left that final decision as pure logic. It's the business rule I need to trust most during a cutover. On my side project it took an afternoon to stand up the service and test; the real work was mapping existing upload states to explicit names.
 
 ## Run one upload
 
-Use Node 20 or newer. The service checks for the configured bucket at startup and creates it as the normal setup step for a fresh account.
+Use Node 20 plus. The service checks for the configured bucket on boot and creates it as the standard step for a new account.
 
 ```bash
 export INFRAI_API_KEY=your_key_here
@@ -28,7 +28,7 @@ In a second terminal:
 npm run upload -- ./sample-video.mp4 creator-17 launch-course
 ```
 
-The final response has this shape:
+The final response looks like:
 
 ```json
 {
@@ -42,11 +42,11 @@ The final response has this shape:
 }
 ```
 
-The example models the processing and notification handoff as returned state. Connect those two fields to your worker and subscriber system after storage completion is stable in your application.
+The sample frames processing and notification as returned state. Wire those two fields to your worker and subscriber system once storage completion is stable in your app.
 
 ## Verify the decision
 
-The focused test feeds `objectFound: true` and `subscriberCount: 125` into the delivery decision. It expects `asset_status: "processing"`, the `transcode-and-package` job, and `subscriber_update: "publish-when-ready"`.
+The focused test pushes `objectFound: true` and `subscriberCount: 125` into the delivery decision. It expects `asset_status: "processing"`, the `transcode-and-package` job, and `subscriber_update: "publish-when-ready"`.
 
 ```bash
 npm test
@@ -64,11 +64,11 @@ npm run typecheck
 
 ## Rollback path
 
-The storefront boundary stays `initiate -> PUT parts -> complete`, so rollback is a routing change back to the incumbent endpoint. Stop assigning new sessions here, let already-issued part URLs finish, and keep processing consumers able to read both object locations until the cutover window closes. Asset IDs and deterministic keys remain unchanged, which makes reconciliation a direct lookup instead of a filename search.
+The storefront boundary stays `initiate -> PUT parts -> complete`, so rollback is just a routing change back to the old endpoint. Stop handing out new sessions here, let issued part URLs finish, and keep processing consumers able to read both object locations until the cutover window closes. Asset IDs and deterministic keys stay the same, making reconciliation a direct lookup instead of a filename hunt.
 
 ## Request handling notes
 
-Every Infrai request sets its HTTP method and Bearer header explicitly. The client decodes the `{ ok, data, error, metadata }` envelope before judging the status, preserves ordinary 4xx responses for the caller, and backs off on 429 responses while respecting `Retry-After`. Initiation also uses the caller's `idempotency_key` to return the same session response when a request is repeated within the service process.
+Every Infrai request sets its HTTP method and Bearer header explicitly. The client decodes the `{ ok, data, error, metadata }` envelope before judging status, passes normal 4xx back to the caller, and backs off on 429 while honoring `Retry-After`. Initiation also uses the caller's `idempotency_key` to return the same session response if the request repeats within the service process. Idempotency like that saves you from double-send bugs I've chased in OTP flows.
 
 ## Setting up for real use: Creator Media Multipart Cutover
 
